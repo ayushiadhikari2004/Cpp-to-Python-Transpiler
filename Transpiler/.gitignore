@@ -1,0 +1,22 @@
+# Compiled files
+*.o
+*.out
+*.exe
+*.tab.c
+*.tab.h
+lex.yy.c
+cpp2py
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*~
+
+# Build directories
+build/
+dist/
+
+# System files
+.DS_Store
+Thumbs.db 
