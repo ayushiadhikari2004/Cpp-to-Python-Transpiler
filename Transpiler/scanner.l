@@ -1,12 +1,9 @@
 %option yylineno
 %{
 /* prologue */
-
 	#include <stdlib.h>
 	#include "parser.tab.h"
-	#include "ast.h" 
-
-	
+	#include "ast.h" 	
 %}
 
 stdio           (std::)
