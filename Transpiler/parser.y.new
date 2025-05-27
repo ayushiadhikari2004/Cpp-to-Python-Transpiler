@@ -1,0 +1,606 @@
+%{
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "symtab.h"
+#include "ast.h"
+#include "translation.h"
+
+extern int yylex();
+extern int yyparse();
+extern FILE *yyin;
+extern int yylineno;
+extern char *yytext;
+
+void yyerror(char *s);
+char *type_to_str(int type);
+void scope_enter();
+void scope_exit();
+bool search_class_body(char *name, struct AST_Node_Statements *body);
+void check_function_call(struct AST_Node_FunctionCall *call);
+DATA_TYPE str_to_type(char *type_str);
+
+struct AST_Node_Statements *root;
+int n_error = 0;
+bool in_class = false;
+
+// Add missing function declarations
+void traverse_class_private_init(AST_Node_Statements*);
+void traverse_class_public_init(AST_Node_Statements*);
+void traverse_class_private_func(AST_Node_Statements*);
+void traverse_class_public_func(AST_Node_Statements*);
+void translate_object_assign(AST_Node_Object*);
+void translate_private_class_func_def(AST_Node_FunctionDef*);
+
+%}
+
+%union {
+    struct AST_Node_Statements *statements;
+    struct AST_Node_Instruction *instruction;
+    struct AST_Node_FunctionCall *funca;
+    struct AST_Node_FunctionDef *functionDef;
+    struct AST_Node_Class *class;
+    struct AST_Node_CBody *cbody;
+    struct AST_Node_If *if_stmt;
+    struct AST_Node_Else_If *else_if_stmt;
+    struct AST_Node_Else *else_stmt;
+    struct AST_Node_For *for_loop;
+    struct AST_Node_Expression *expr;
+    struct AST_Node_Operand *operand;
+    struct AST_Node_Input *input;
+    struct AST_Node_Output *output;
+    struct AST_Node_Assign *assign;
+    struct AST_Node_Init *init;
+    struct AST_Node_Params *params;
+    struct AST_Node_FBody *fbody;
+    struct AST_Node_Object *object;
+    struct AST_Node_Parent_Public *parent_public;
+    struct AST_Node_Return *returnNode;
+    DATA_TYPE type;
+    const char *str;
+}
+
+%token <str> ID INT_NUMBER FLOAT_NUMBER STRING_V BOOL_V
+%token <type> FLOAT INT STRING BOOL
+%token <str> COMMA SEMICOLON LPAR RPAR LBRACE RBRACE COLON
+%token <str> EQ ADD SUB MUL DIV LT GT LE GE EEQ NEQ AND OR
+%token <str> IF ELSE FOR PUBLIC PRIVATE NEW
+%token <str> LSHIFT RSHIFT
+%token <str> MAIN RETURN CLASS
+
+%type <statements> program statements
+%type <instruction> statement
+%type <funca> function_call
+%type <functionDef> function_def
+%type <class> create_class create_class_child
+%type <object> create_object access_class
+%type <if_stmt> if_statement
+%type <else_if_stmt> else_if_statement
+%type <else_stmt> else_statement
+%type <for_loop> for_loop
+%type <expr> content logic_expr rel_expr expr if_condition
+%type <fbody> func_body
+%type <params> fun_param multi_fun_param
+%type <init> initialization
+%type <assign> assignment
+%type <input> input_stmnt
+%type <output> output_stmnt
+%type <cbody> class_body private_body public_body
+%type <parent_public> parent_public_body
+%type <class> class class_child
+%type <input> single_rshift
+%type <output> single_lshift
+%type <type> types
+%type <instruction> instruction
+%type <expr> math_expr
+%type <object> object
+
+%%
+
+program:   { scope_enter(); } statements { root = $2; scope_exit(); }
+    ;
+
+statements: statement statements { 
+        $$ = (struct AST_Node_Statements*)malloc(sizeof(struct AST_Node_Statements));
+        $$->instruction = $1;
+        $$->next = $2;
+    }
+    | statement {
+        $$ = (struct AST_Node_Statements*)malloc(sizeof(struct AST_Node_Statements));
+        $$->instruction = $1;
+        $$->next = NULL;
+    }
+    ;
+
+statement: instruction {
+        $$ = (struct AST_Node_Instruction*)malloc(sizeof(struct AST_Node_Instruction));
+        $$->type = NODE_INSTRUCTION;
+        $$->value = $1;
+    }
+    | function_def {
+        $$ = (struct AST_Node_Instruction*)malloc(sizeof(struct AST_Node_Instruction));
+        $$->type = NODE_FUNCTION_DEF;
+        $$->value.functionDef = $1;
+    }
+    | create_class SEMICOLON {
+        $$ = (struct AST_Node_Instruction*)malloc(sizeof(struct AST_Node_Instruction));
+        $$->type = NODE_CLASS;
+        $$->value.class = $1;
+    }
+    | create_class_child SEMICOLON {
+        $$ = (struct AST_Node_Instruction*)malloc(sizeof(struct AST_Node_Instruction));
+        $$->type = NODE_CLASS;
+        $$->value.class = $1;
+    }
+    | create_object SEMICOLON {
+        $$ = (struct AST_Node_Instruction*)malloc(sizeof(struct AST_Node_Instruction));
+        $$->type = NODE_OBJECT;
+        $$->value.object = $1;
+    }
+    | access_class SEMICOLON {
+        $$ = (struct AST_Node_Instruction*)malloc(sizeof(struct AST_Node_Instruction));
+        $$->type = NODE_OBJECT;
+        $$->value.object = $1;
+    }
+    | if_statement {
+        $$ = (struct AST_Node_Instruction*)malloc(sizeof(struct AST_Node_Instruction));
+        $$->type = NODE_IF;
+        $$->value.if_stmt = $1;
+    }
+    | else_if_statement {
+        $$ = (struct AST_Node_Instruction*)malloc(sizeof(struct AST_Node_Instruction));
+        $$->type = NODE_ELSE_IF;
+        $$->value.else_if_stmt = $1;
+    }
+    | else_statement {
+        $$ = (struct AST_Node_Instruction*)malloc(sizeof(struct AST_Node_Instruction));
+        $$->type = NODE_ELSE;
+        $$->value.else_stmt = $1;
+    }
+    | for_loop {
+        $$ = (struct AST_Node_Instruction*)malloc(sizeof(struct AST_Node_Instruction));
+        $$->type = NODE_FOR;
+        $$->value.for_loop = $1;
+    }
+    | input_stmnt SEMICOLON {
+        $$ = (struct AST_Node_Instruction*)malloc(sizeof(struct AST_Node_Instruction));
+        $$->type = NODE_INPUT;
+        $$->value.input = $1;
+    }
+    | output_stmnt SEMICOLON {
+        $$ = (struct AST_Node_Instruction*)malloc(sizeof(struct AST_Node_Instruction));
+        $$->type = NODE_OUTPUT;
+        $$->value.output = $1;
+    }
+    | assignment SEMICOLON {
+        $$ = (struct AST_Node_Instruction*)malloc(sizeof(struct AST_Node_Instruction));
+        $$->type = NODE_ASSIGN;
+        $$->value.assign = $1;
+    }
+    | initialization SEMICOLON {
+        $$ = (struct AST_Node_Instruction*)malloc(sizeof(struct AST_Node_Instruction));
+        $$->type = NODE_INIT;
+        $$->value.init = $1;
+    }
+    | RETURN content SEMICOLON {
+        $$ = (struct AST_Node_Instruction*)malloc(sizeof(struct AST_Node_Instruction));
+        $$->type = NODE_RETURN;
+        struct AST_Node_Return *return_node = (struct AST_Node_Return*)malloc(sizeof(struct AST_Node_Return));
+        struct AST_Node *operand_node = (struct AST_Node *)malloc(sizeof(struct AST_Node));
+        operand_node->n_type = OPERAND_NODE;
+        operand_node->value = $2;
+        return_node->value = operand_node;
+        $$->value.returnNode = return_node;
+    }
+    ;
+
+function_call: ID LPAR multi_fun_param RPAR { 
+        $$ = (struct AST_Node_FunctionCall*)malloc(sizeof(struct AST_Node_FunctionCall));
+        $$->func_name = $1;
+        $$->params = $3;
+        $$->return_type = DATA_TYPE_NONE;
+    }
+    | ID LPAR RPAR { 
+        $$ = (struct AST_Node_FunctionCall*)malloc(sizeof(struct AST_Node_FunctionCall));
+        $$->func_name = $1;
+        $$->params = NULL;
+        $$->return_type = DATA_TYPE_NONE;
+    }
+    ;
+
+function_def: types ID LPAR fun_param RPAR func_body { 
+        $$ = (struct AST_Node_FunctionDef*)malloc(sizeof(struct AST_Node_FunctionDef));
+        $$->func_name = $2;
+        $$->params = $4;
+        $$->return_type = $1;
+        $$->f_body = $6;
+    }
+    | types ID LPAR RPAR func_body { 
+        $$ = (struct AST_Node_FunctionDef*)malloc(sizeof(struct AST_Node_FunctionDef));
+        $$->func_name = $2;
+        $$->params = NULL;
+        $$->return_type = $1;
+        $$->f_body = $5;
+    }
+    | INT MAIN LPAR RPAR func_body { 
+        $$ = (struct AST_Node_FunctionDef*)malloc(sizeof(struct AST_Node_FunctionDef));
+        $$->func_name = strdup("main");
+        $$->params = NULL;
+        $$->return_type = DATA_TYPE_INT;
+        $$->f_body = $5;
+    }
+    ;
+
+if_statement: IF LPAR if_condition RPAR LBRACE statements RBRACE { 
+        $$ = (struct AST_Node_If*)malloc(sizeof(struct AST_Node_If));
+        $$->condition = $3;
+        $$->if_body = $6;
+    }
+    ;
+
+else_if_statement: ELSE IF LPAR if_condition RPAR LBRACE statements RBRACE { 
+        $$ = (struct AST_Node_Else_If*)malloc(sizeof(struct AST_Node_Else_If));
+        $$->condition = $4;
+        $$->elif_body = $7;
+    }
+    ;
+
+else_statement: ELSE LBRACE statements RBRACE { 
+        $$ = (struct AST_Node_Else*)malloc(sizeof(struct AST_Node_Else));
+        $$->else_body = $3;
+    }
+    ;
+
+for_loop: FOR LPAR assignment SEMICOLON if_condition SEMICOLON assignment RPAR LBRACE statements RBRACE { 
+        $$ = (struct AST_Node_For*)malloc(sizeof(struct AST_Node_For));
+        $$->init = $3;
+        $$->condition = $5;
+        $$->increment = $7;
+        $$->for_body = $10;
+    }
+    ;
+
+single_rshift: RSHIFT ID { 
+        $$ = (struct AST_Node_Input*)malloc(sizeof(struct AST_Node_Input));
+        $$->input_op = (struct AST_Node_Operand*)malloc(sizeof(struct AST_Node_Operand));
+        $$->input_op->value.val = $2;
+        $$->input_op->val_type = DATA_TYPE_NONE;
+        $$->input_op->operand_type = CONTENT_TYPE_ID;
+    }
+    ;
+
+single_lshift: LSHIFT content { 
+        $$ = (struct AST_Node_Output*)malloc(sizeof(struct AST_Node_Output));
+        $$->output_op = (struct AST_Node_Operand*)malloc(sizeof(struct AST_Node_Operand));
+        $$->output_op->value = $2->value;
+        $$->output_op->val_type = $2->val_type;
+        $$->output_op->operand_type = $2->operand_type;
+    }
+    ;
+
+fun_param: types ID { 
+        $$ = (struct AST_Node_Params*)malloc(sizeof(struct AST_Node_Params));
+        $$->decl_param = (struct AST_Node_Init*)malloc(sizeof(struct AST_Node_Init));
+        $$->decl_param->data_type = $1;
+        $$->decl_param->assign = (struct AST_Node_Assign*)malloc(sizeof(struct AST_Node_Assign));
+        $$->decl_param->assign->val_type = $1;
+        $$->decl_param->assign->var = $2;
+        $$->next_param = NULL;
+    }
+    | content { 
+        $$ = (struct AST_Node_Params*)malloc(sizeof(struct AST_Node_Params));
+        $$->call_param = $1;
+        $$->next_param = NULL;
+    }
+    ;
+
+multi_fun_param: fun_param { $$ = $1; }
+    | fun_param COMMA multi_fun_param { 
+        $1->next_param = $3;
+        $$ = $1;
+    }
+    ;
+
+initialization: types ID { 
+        $$ = (struct AST_Node_Init*)malloc(sizeof(struct AST_Node_Init));
+        $$->data_type = $1;
+        $$->next_init = NULL;
+        $$->assign = (struct AST_Node_Assign*)malloc(sizeof(struct AST_Node_Assign));
+        $$->assign->val_type = $1;
+        $$->assign->var = $2;
+    }
+    ;
+
+assignment: ID EQ content { 
+        $$ = (struct AST_Node_Assign*)malloc(sizeof(struct AST_Node_Assign));
+        $$->var = $1;
+        $$->a_val = $3->value;
+        $$->val_type = $3->val_type;
+        $$->a_type = $3->operand_type;
+    }
+    ;
+
+content: ID { 
+        $$ = (struct AST_Node_Operand*)malloc(sizeof(struct AST_Node_Operand));
+        $$->value.val = $1;
+        $$->val_type = DATA_TYPE_NONE;
+        $$->operand_type = CONTENT_TYPE_ID;
+    }
+    | FLOAT_NUMBER { 
+        $$ = (struct AST_Node_Operand*)malloc(sizeof(struct AST_Node_Operand));
+        $$->value.val = $1;
+        $$->val_type = DATA_TYPE_FLOAT;
+        $$->operand_type = CONTENT_TYPE_FLOAT_NUMBER;
+    }
+    | INT_NUMBER { 
+        $$ = (struct AST_Node_Operand*)malloc(sizeof(struct AST_Node_Operand));
+        $$->value.val = $1;
+        $$->val_type = DATA_TYPE_INT;
+        $$->operand_type = CONTENT_TYPE_INT_NUMBER;
+    }
+    | STRING_V { 
+        $$ = (struct AST_Node_Operand*)malloc(sizeof(struct AST_Node_Operand));
+        $$->value.val = $1;
+        $$->val_type = DATA_TYPE_STRING;
+        $$->operand_type = CONTENT_TYPE_STRING;
+    }
+    | BOOL_V { 
+        $$ = (struct AST_Node_Operand*)malloc(sizeof(struct AST_Node_Operand));
+        $$->value.val = strcmp($1, "true") == 0 ? strdup("True") : strdup("False");
+        $$->val_type = DATA_TYPE_BOOL;
+        $$->operand_type = CONTENT_TYPE_BOOL;
+    }
+    | function_call { 
+        $$ = (struct AST_Node_Operand*)malloc(sizeof(struct AST_Node_Operand));
+        $$->value.funca = $1;
+        $$->val_type = $1->return_type;
+        $$->operand_type = CONTENT_TYPE_FUNCTION;
+    }
+    | expr { 
+        $$ = (struct AST_Node_Operand*)malloc(sizeof(struct AST_Node_Operand));
+        $$->value.expr = $1;
+        $$->val_type = $1->expr_type;
+        $$->operand_type = CONTENT_TYPE_EXPRESSION;
+    }
+    ;
+
+expr: math_expr { $$ = $1; }
+    | logic_expr { $$ = $1; }
+    | rel_expr { $$ = $1; }
+    | LPAR expr RPAR { $$ = $2; }
+    ;
+
+math_expr: content ADD content { 
+        $$ = (struct AST_Node_Expression*)malloc(sizeof(struct AST_Node_Expression));
+        $$->left_op = $1;
+        $$->right_op = $3;
+        $$->op = strdup("+");
+        $$->expr_type = $1->val_type;
+    }
+    | content SUB content { 
+        $$ = (struct AST_Node_Expression*)malloc(sizeof(struct AST_Node_Expression));
+        $$->left_op = $1;
+        $$->right_op = $3;
+        $$->op = strdup("-");
+        $$->expr_type = $1->val_type;
+    }
+    | content MUL content { 
+        $$ = (struct AST_Node_Expression*)malloc(sizeof(struct AST_Node_Expression));
+        $$->left_op = $1;
+        $$->right_op = $3;
+        $$->op = strdup("*");
+        $$->expr_type = $1->val_type;
+    }
+    | content DIV content { 
+        $$ = (struct AST_Node_Expression*)malloc(sizeof(struct AST_Node_Expression));
+        $$->left_op = $1;
+        $$->right_op = $3;
+        $$->op = strdup("/");
+        $$->expr_type = $1->val_type;
+    }
+    ;
+
+logic_expr: content AND content { 
+        $$ = (struct AST_Node_Expression*)malloc(sizeof(struct AST_Node_Expression));
+        $$->left_op = $1;
+        $$->right_op = $3;
+        $$->op = strdup("and");
+        $$->expr_type = DATA_TYPE_BOOL;
+    }
+    | content OR content { 
+        $$ = (struct AST_Node_Expression*)malloc(sizeof(struct AST_Node_Expression));
+        $$->left_op = $1;
+        $$->right_op = $3;
+        $$->op = strdup("or");
+        $$->expr_type = DATA_TYPE_BOOL;
+    }
+    ;
+
+rel_expr: content LT content { 
+        $$ = (struct AST_Node_Expression*)malloc(sizeof(struct AST_Node_Expression));
+        $$->left_op = $1;
+        $$->right_op = $3;
+        $$->op = strdup("<");
+        $$->expr_type = DATA_TYPE_BOOL;
+    }
+    | content LE content { 
+        $$ = (struct AST_Node_Expression*)malloc(sizeof(struct AST_Node_Expression));
+        $$->left_op = $1;
+        $$->right_op = $3;
+        $$->op = strdup("<=");
+        $$->expr_type = DATA_TYPE_BOOL;
+    }
+    | content GT content { 
+        $$ = (struct AST_Node_Expression*)malloc(sizeof(struct AST_Node_Expression));
+        $$->left_op = $1;
+        $$->right_op = $3;
+        $$->op = strdup(">");
+        $$->expr_type = DATA_TYPE_BOOL;
+    }
+    | content GE content { 
+        $$ = (struct AST_Node_Expression*)malloc(sizeof(struct AST_Node_Expression));
+        $$->left_op = $1;
+        $$->right_op = $3;
+        $$->op = strdup(">=");
+        $$->expr_type = DATA_TYPE_BOOL;
+    }
+    | content EEQ content { 
+        $$ = (struct AST_Node_Expression*)malloc(sizeof(struct AST_Node_Expression));
+        $$->left_op = $1;
+        $$->right_op = $3;
+        $$->op = strdup("==");
+        $$->expr_type = DATA_TYPE_BOOL;
+    }
+    | content NEQ content { 
+        $$ = (struct AST_Node_Expression*)malloc(sizeof(struct AST_Node_Expression));
+        $$->left_op = $1;
+        $$->right_op = $3;
+        $$->op = strdup("!=");
+        $$->expr_type = DATA_TYPE_BOOL;
+    }
+    ;
+
+if_condition: expr { $$ = $1; }
+    ;
+
+func_body: LBRACE statements RETURN content SEMICOLON RBRACE { 
+        $$ = (struct AST_Node_FBody*)malloc(sizeof(struct AST_Node_FBody));
+        $$->func_body = $2;
+        $$->return_op = $4;
+    }
+    | LBRACE RETURN content SEMICOLON RBRACE {
+        $$ = (struct AST_Node_FBody*)malloc(sizeof(struct AST_Node_FBody));
+        $$->func_body = NULL;
+        $$->return_op = $3;
+    }
+    | LBRACE statements RBRACE {
+        $$ = (struct AST_Node_FBody*)malloc(sizeof(struct AST_Node_FBody));
+        $$->func_body = $2;
+        $$->return_op = NULL;
+    };
+
+class: CLASS ID LBRACE class_body RBRACE { 
+        $$ = (struct AST_Node_Class*)malloc(sizeof(struct AST_Node_Class));
+        $$->class_name = $2;
+        $$->c_body = $4;
+        $$->parent_class = NULL;
+        $$->parent_class_public = NULL;
+    }
+    ;
+
+class_child: CLASS ID COLON PUBLIC ID LBRACE class_body RBRACE { 
+        $$ = (struct AST_Node_Class*)malloc(sizeof(struct AST_Node_Class));
+        $$->class_name = $2;
+        $$->c_body = $7;
+        $$->parent_class = NULL;
+        $$->parent_class_public = (struct AST_Node_Parent_Public*)malloc(sizeof(struct AST_Node_Parent_Public));
+        $$->parent_class_public->parent_pub_body = NULL;
+        $$->parent_class_public->next_parent_public = NULL;
+    }
+    ;
+
+class_body: LBRACE PRIVATE LBRACE statements RBRACE PUBLIC LBRACE statements RBRACE RBRACE { 
+        $$ = (struct AST_Node_CBody*)malloc(sizeof(struct AST_Node_CBody));
+        $$->pri_body = $4;
+        $$->pub_body = $8;
+    }
+    ;
+
+object: ID EQ NEW ID LPAR RPAR { 
+        $$ = (struct AST_Node_Object*)malloc(sizeof(struct AST_Node_Object));
+        $$->obj_name = $1;
+        $$->obj_class = (struct AST_Node_Class*)malloc(sizeof(struct AST_Node_Class));
+        $$->obj_class->class_name = $4;
+        $$->access_type = ACCESS_TYPE_VAR;
+    }
+    ;
+
+types: FLOAT { $$ = DATA_TYPE_FLOAT; }
+    | INT { $$ = DATA_TYPE_INT; }
+    | STRING { $$ = DATA_TYPE_STRING; }
+    | BOOL { $$ = DATA_TYPE_BOOL; }
+    ;
+
+// Add placeholder rules for missing nonterminals
+grammar_placeholder: /* empty */;
+
+create_class: class { $$ = $1; };
+create_class_child: class_child { $$ = $1; };
+create_object: object { $$ = $1; };
+access_class: object { $$ = $1; };
+input_stmnt: single_rshift { $$ = $1; };
+output_stmnt: single_lshift { $$ = $1; };
+private_body: statements { $$ = $1; };
+public_body: statements { $$ = $1; };
+parent_public_body: statements { $$ = $1; };
+instruction: function_call { $$ = (struct AST_Node_Instruction*)malloc(sizeof(struct AST_Node_Instruction)); $$->type = NODE_INSTRUCTION; $$->value.funca = $1; };
+
+%%
+
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        printf("Usage: %s <input_file>\n", argv[0]);
+        return 1;
+    }
+
+    yyin = fopen(argv[1], "r");
+    if (yyin == NULL) {
+        printf("Error: Cannot open input file %s\n", argv[1]);
+        return 1;
+    }
+
+    fptr = fopen("output.py", "w");
+    if (fptr == NULL) {
+        printf("Error: Cannot create output file\n");
+        fclose(yyin);
+        return 1;
+    }
+
+    yyparse();
+
+    if (n_error == 0) {
+        traverse(root);
+    }
+
+    fclose(yyin);
+    fclose(fptr);
+    return 0;
+}
+
+void yyerror(char *s) {
+    printf("\n\n\t***Error: %s***\n\t***Line: %d***\n\n\n", s, yylineno);
+    n_error++;
+}
+
+char *type_to_str(int type) {
+    switch(type) {
+        case DATA_TYPE_STRING:
+            return strdup("string");
+        case DATA_TYPE_FLOAT:
+            return strdup("float");
+        case DATA_TYPE_INT:
+            return strdup("int");
+        case DATA_TYPE_BOOL:
+            return strdup("bool");
+        case DATA_TYPE_NONE:
+            return strdup("Type none");
+        default:
+            return strdup("Type not defined");
+    }
+}
+
+DATA_TYPE str_to_type(char *type_str) {
+    if (strcmp(type_str, "float") == 0) return DATA_TYPE_FLOAT;
+    if (strcmp(type_str, "int") == 0) return DATA_TYPE_INT;
+    if (strcmp(type_str, "string") == 0) return DATA_TYPE_STRING;
+    if (strcmp(type_str, "bool") == 0) return DATA_TYPE_BOOL;
+    return DATA_TYPE_NONE;
+}
+
+// Add missing function declarations
+void traverse_class_private_init(AST_Node_Statements*);
+void traverse_class_public_init(AST_Node_Statements*);
+void traverse_class_private_func(AST_Node_Statements*);
+void traverse_class_public_func(AST_Node_Statements*);
+void translate_object_assign(AST_Node_Object*);
+void translate_private_class_func_def(AST_Node_FunctionDef*); 
